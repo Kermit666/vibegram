@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex Remote Mini App (Spike)</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #0f172a;
+        --fg: #e2e8f0;
+        --muted: #94a3b8;
+        --accent: #22c55e;
+        --card: #1e293b;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+      }
+
+      main {
+        max-width: 680px;
+        margin: 0 auto;
+        padding: 24px 16px 40px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 1.35rem;
+      }
+
+      p {
+        margin: 0 0 16px;
+        color: var(--muted);
+      }
+
+      .card {
+        background: var(--card);
+        border-radius: 12px;
+        padding: 14px;
+        margin: 12px 0;
+      }
+
+      button {
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 12px;
+        margin: 6px 6px 0 0;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .primary {
+        background: var(--accent);
+        color: #052e16;
+      }
+
+      .secondary {
+        background: #334155;
+        color: var(--fg);
+      }
+
+      code {
+        background: rgba(148, 163, 184, 0.15);
+        border-radius: 6px;
+        padding: 2px 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Codex Remote Mini App (Spike)</h1>
+      <p>
+        Prototype only. This is not wired to the bot backend yet.
+      </p>
+
+      <div class="card">
+        <div><strong>Telegram User:</strong> <span id="user">n/a</span></div>
+        <div><strong>Chat Type:</strong> <span id="chatType">n/a</span></div>
+      </div>
+
+      <div class="card">
+        <strong>Quick Actions</strong><br />
+        <button class="primary" id="openPanel">Open /panel</button>
+        <button class="secondary" id="showStatus">Insert /status</button>
+        <button class="secondary" id="showThreads">Insert /threads 10</button>
+      </div>
+
+      <div class="card">
+        <strong>Next Step</strong>
+        <p>
+          Add HTTPS hosting for this page and set
+          <code>TELEGRAM_MENU_WEBAPP_URL</code>.
+        </p>
+      </div>
+    </main>
+
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="./spike.js"></script>
+  </body>
+</html>
