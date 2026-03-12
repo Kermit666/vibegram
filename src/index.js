@@ -38,6 +38,8 @@ const MAX_THREAD_LABEL_LENGTH = 90;
 const MAX_THREAD_PREVIEW_LENGTH = 120;
 const PANEL_THREAD_PAGE_SIZE = 6;
 const PANEL_REPO_PAGE_SIZE = 7;
+const PANEL_THREAD_BROWSE_LIMIT = 400;
+const PANEL_REPO_BROWSE_LIMIT = 120;
 const MAX_INLINE_BUTTON_LABEL = 52;
 const PANEL_TRANSCRIPT_TURN_LIMIT = 10;
 const THREAD_REPLAY_TURN_LIMIT = 10;
@@ -877,7 +879,7 @@ function resolveReplayThreadForCurrentContext() {
     };
   }
 
-  const recentThreads = getRecentThreadIds(80);
+  const recentThreads = getRecentThreadIds(PANEL_THREAD_BROWSE_LIMIT);
   if (recentThreads.length === 0) {
     return null;
   }
@@ -1401,7 +1403,7 @@ function createPanelMenus() {
     .text("Conversations", async (ctx) => {
       const chatId = String(ctx.chat.id);
       const state = getMenuState(chatId);
-      state.threadChoices = getRecentThreadIds(60);
+      state.threadChoices = getRecentThreadIds(PANEL_THREAD_BROWSE_LIMIT);
       state.threadPage = 0;
       state.threadBackAction = "panel:main";
       state.threadFilterRepoPath = null;
@@ -1425,7 +1427,7 @@ function createPanelMenus() {
     .text("Repositories", async (ctx) => {
       const chatId = String(ctx.chat.id);
       const state = getMenuState(chatId);
-      state.repoChoices = getRecentRepos(60);
+      state.repoChoices = getRecentRepos(PANEL_REPO_BROWSE_LIMIT);
       state.repoPage = 0;
       await renderReposPanel(ctx, state, { page: 0 });
     })
@@ -1436,7 +1438,7 @@ function createPanelMenus() {
     .text("List Threads", async (ctx) => {
       const chatId = String(ctx.chat.id);
       const state = getMenuState(chatId);
-      state.threadChoices = getRecentThreadIds(60);
+      state.threadChoices = getRecentThreadIds(PANEL_THREAD_BROWSE_LIMIT);
       state.threadPage = 0;
       state.threadBackAction = "panel:main";
       state.threadFilterRepoPath = null;
@@ -1458,7 +1460,7 @@ function createPanelMenus() {
     .text("Conversations", async (ctx) => {
       const chatId = String(ctx.chat.id);
       const state = getMenuState(chatId);
-      state.threadChoices = getRecentThreadIds(60);
+      state.threadChoices = getRecentThreadIds(PANEL_THREAD_BROWSE_LIMIT);
       state.threadPage = 0;
       state.threadBackAction = "panel:main";
       state.threadFilterRepoPath = null;
@@ -1467,7 +1469,7 @@ function createPanelMenus() {
     .text("Repositories", async (ctx) => {
       const chatId = String(ctx.chat.id);
       const state = getMenuState(chatId);
-      state.repoChoices = getRecentRepos(60);
+      state.repoChoices = getRecentRepos(PANEL_REPO_BROWSE_LIMIT);
       state.repoPage = 0;
       await renderReposPanel(ctx, state, { page: 0 });
     });
@@ -1515,7 +1517,8 @@ function createPanelMenus() {
       }
 
       const selectedNormalized = normalizeFsPath(repoPath);
-      const threads = getRecentThreadIds(80).filter((thread) => normalizeFsPath(thread.cwd) === selectedNormalized);
+      const threads = getRecentThreadIds(PANEL_THREAD_BROWSE_LIMIT)
+        .filter((thread) => normalizeFsPath(thread.cwd) === selectedNormalized);
       if (threads.length === 0) {
         await showPanelMessage(
           ctx,
@@ -1556,7 +1559,7 @@ function createPanelMenus() {
     .text("Back to Repos", async (ctx) => {
       const chatId = String(ctx.chat.id);
       const state = getMenuState(chatId);
-      state.repoChoices = getRecentRepos(60);
+      state.repoChoices = getRecentRepos(PANEL_REPO_BROWSE_LIMIT);
       state.repoPage = 0;
       await renderReposPanel(ctx, state, { page: 0 });
     })
@@ -1936,7 +1939,7 @@ bot.callbackQuery(/^panel:(main|status|switch|new|repos|threads|setpath)$/, asyn
     }
 
     if (action === "threads" || action === "switch") {
-      state.threadChoices = getRecentThreadIds(60);
+      state.threadChoices = getRecentThreadIds(PANEL_THREAD_BROWSE_LIMIT);
       state.threadPage = 0;
       state.threadBackAction = "panel:main";
       state.threadFilterRepoPath = null;
@@ -1960,7 +1963,7 @@ bot.callbackQuery(/^panel:(main|status|switch|new|repos|threads|setpath)$/, asyn
     }
 
     if (action === "repos") {
-      state.repoChoices = getRecentRepos(60);
+      state.repoChoices = getRecentRepos(PANEL_REPO_BROWSE_LIMIT);
       state.repoPage = 0;
       await renderReposPanel(ctx, state, { page: 0 });
       return;
@@ -2106,7 +2109,8 @@ bot.callbackQuery(/^repo:action:(new|set|switch)$/, async (ctx) => {
 
     if (action === "switch") {
       const selectedNormalized = normalizeFsPath(repoPath);
-      const threads = getRecentThreadIds(80).filter((thread) => normalizeFsPath(thread.cwd) === selectedNormalized);
+      const threads = getRecentThreadIds(PANEL_THREAD_BROWSE_LIMIT)
+        .filter((thread) => normalizeFsPath(thread.cwd) === selectedNormalized);
       if (threads.length === 0) {
         await showPanelMessage(
           ctx,
