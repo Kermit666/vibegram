@@ -54,6 +54,35 @@ function parsePositiveInt(rawValue, fallback) {
   return parsed;
 }
 
+function parseBoolean(rawValue, fallback) {
+  if (!rawValue?.trim()) {
+    return fallback;
+  }
+
+  const normalized = rawValue.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  throw new Error(`Expected a boolean value, received "${rawValue}".`);
+}
+
+function parseChoice(rawValue, name, allowedValues, fallback) {
+  if (!rawValue?.trim()) {
+    return fallback;
+  }
+
+  const normalized = rawValue.trim().toLowerCase();
+  if (allowedValues.includes(normalized)) {
+    return normalized;
+  }
+
+  throw new Error(`${name} must be one of: ${allowedValues.join(", ")}.`);
+}
+
 function parseOptionalUrl(rawValue, name) {
   if (!rawValue?.trim()) {
     return "";
@@ -73,10 +102,45 @@ function parseOptionalUrl(rawValue, name) {
   return parsed.toString();
 }
 
+function parseOptionalDirectory(rawValue, name) {
+  if (!rawValue?.trim()) {
+    return "";
+  }
+
+  const resolved = path.resolve(rawValue.trim());
+  if (fs.existsSync(resolved) && !fs.statSync(resolved).isDirectory()) {
+    throw new Error(`${name} must point to a directory path.`);
+  }
+
+  return resolved;
+}
+
 const telegramToken = requireEnv("TELEGRAM_BOT_TOKEN");
 const allowedChatIds = parseChatIds(requireEnv("TELEGRAM_ALLOWED_CHAT_IDS"));
 const codexCommand = process.env.CODEX_COMMAND?.trim() || "codex";
 const codexExtraArgs = parseJsonArray(process.env.CODEX_EXTRA_ARGS, "CODEX_EXTRA_ARGS");
+const voiceToCodexEnabled = parseBoolean(process.env.VOICE_TO_CODEX_ENABLED, true);
+const voiceMaxDurationSeconds = parsePositiveInt(process.env.VOICE_MAX_DURATION_SECONDS, 180);
+const voiceMaxFileBytes = parsePositiveInt(process.env.VOICE_MAX_FILE_BYTES, 20 * 1024 * 1024);
+const voiceTempDir = parseOptionalDirectory(process.env.VOICE_TEMP_DIR, "VOICE_TEMP_DIR");
+const ffmpegCommand = process.env.FFMPEG_COMMAND?.trim() || "ffmpeg";
+const whisperCommand = process.env.WHISPER_COMMAND?.trim() || "whisper";
+const whisperModel = process.env.WHISPER_MODEL?.trim() || "base";
+const whisperLanguage = process.env.WHISPER_LANGUAGE?.trim() || "";
+const whisperDevice = parseChoice(
+  process.env.WHISPER_DEVICE,
+  "WHISPER_DEVICE",
+  ["auto", "cpu", "cuda"],
+  "auto",
+);
+const whisperTask = parseChoice(
+  process.env.WHISPER_TASK,
+  "WHISPER_TASK",
+  ["transcribe", "translate"],
+  "transcribe",
+);
+const whisperTimeoutMs = parsePositiveInt(process.env.WHISPER_TIMEOUT_MS, 180000);
+const whisperFp16 = parseBoolean(process.env.WHISPER_FP16, false);
 const configuredWorkdir = process.env.CODEX_WORKDIR?.trim()
   ? path.resolve(process.env.CODEX_WORKDIR)
   : process.cwd();
@@ -90,6 +154,18 @@ export const config = {
   allowedChatIds,
   codexCommand,
   codexExtraArgs,
+  voiceToCodexEnabled,
+  voiceMaxDurationSeconds,
+  voiceMaxFileBytes,
+  voiceTempDir,
+  ffmpegCommand,
+  whisperCommand,
+  whisperModel,
+  whisperLanguage,
+  whisperDevice,
+  whisperTask,
+  whisperTimeoutMs,
+  whisperFp16,
   defaultWorkdir: configuredWorkdir,
   outputFlushMs: parsePositiveInt(process.env.OUTPUT_FLUSH_MS, 1200),
   maxBufferedChars: parsePositiveInt(process.env.MAX_BUFFERED_CHARS, 16000),

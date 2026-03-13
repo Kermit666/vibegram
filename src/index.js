@@ -1,4 +1,4 @@
-import { createHash, randomInt } from "node:crypto";
+import { createHash, randomInt, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,17 +10,31 @@ import { config } from "./config.js";
 import { createChatStateStore } from "./chatStateStore.js";
 import { CodexSession } from "./codexSession.js";
 import { SessionHistoryStore } from "./sessionHistory.js";
+import { VoiceTranscriber } from "./voiceTranscriber.js";
 
 const bot = new Bot(config.telegramToken);
 const session = new CodexSession({
   command: config.codexCommand,
   extraArgs: config.codexExtraArgs,
 });
+const voiceTranscriber = new VoiceTranscriber({
+  ffmpegCommand: config.ffmpegCommand,
+  whisperCommand: config.whisperCommand,
+  whisperModel: config.whisperModel,
+  whisperTask: config.whisperTask,
+  whisperLanguage: config.whisperLanguage,
+  whisperDevice: config.whisperDevice,
+  whisperTimeoutMs: config.whisperTimeoutMs,
+  whisperFp16: config.whisperFp16,
+});
 
 const PROGRESS_TICK_MS = 1000;
 const TYPING_ACTION_INTERVAL_MS = 4000;
 const PROGRESS_FRAMES = ["loading", "loading.", "loading..", "loading..."];
+const VOICE_TRANSCRIPT_PREVIEW_CHARS = 300;
+const VOICE_JOB_DIR_PREFIX = "vibegram-voice";
 const subscribers = new Set();
+const voiceProcessingChats = new Set();
 const {
   getChatState,
   getMenuState,
@@ -69,6 +83,8 @@ const AUTHORIZED_IDLE_BOT_COMMANDS = [
   { command: "status", description: "Show Codex session status" },
   { command: "threads", description: "List recent thread IDs" },
   { command: "replay", description: "Replay recent turns from a thread" },
+  { command: "voice_status", description: "Show voice transcription status" },
+  { command: "voice_help", description: "Show voice note usage help" },
   { command: "clear_chat", description: "Delete recent bot messages" },
   { command: "start_codex", description: "Start a new Codex session" },
   { command: "resume_thread", description: "Resume an existing thread" },
@@ -84,6 +100,8 @@ const AUTHORIZED_ACTIVE_BOT_COMMANDS = [
   { command: "status", description: "Show Codex session status" },
   { command: "threads", description: "List recent thread IDs" },
   { command: "replay", description: "Replay recent turns from a thread" },
+  { command: "voice_status", description: "Show voice transcription status" },
+  { command: "voice_help", description: "Show voice note usage help" },
   { command: "clear_chat", description: "Delete recent bot messages" },
   { command: "restart_codex", description: "Restart Codex session" },
   { command: "stop_codex", description: "Stop current Codex session" },
@@ -234,6 +252,194 @@ async function callTelegramMethod(method, payload) {
   }
 
   return data.result;
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value < 0) {
+    return "n/a";
+  }
+
+  if (value < 1024) {
+    return `${Math.round(value)} B`;
+  }
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB`;
+  }
+  if (value < 1024 * 1024 * 1024) {
+    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function clipText(text, maxLen = VOICE_TRANSCRIPT_PREVIEW_CHARS) {
+  const normalized = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized.length <= maxLen) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxLen - 3)}...`;
+}
+
+function voicePromptPrefix() {
+  return config.whisperTask === "translate"
+    ? "Voice transcript (translated):"
+    : "Voice transcript:";
+}
+
+function voiceTempRootDir() {
+  return config.voiceTempDir || path.join(os.tmpdir(), VOICE_JOB_DIR_PREFIX);
+}
+
+async function createVoiceJobDirectory() {
+  const root = voiceTempRootDir();
+  await fs.promises.mkdir(root, { recursive: true });
+  const jobName = `${Date.now()}-${randomUUID()}`;
+  const jobDir = path.join(root, jobName);
+  await fs.promises.mkdir(jobDir, { recursive: true });
+  return jobDir;
+}
+
+async function removeDirectoryQuietly(targetPath) {
+  if (!targetPath) {
+    return;
+  }
+
+  try {
+    await fs.promises.rm(targetPath, { recursive: true, force: true });
+  } catch (error) {
+    console.warn(`Failed to remove temp directory ${targetPath}: ${error.message}`);
+  }
+}
+
+function telegramFileDownloadUrl(filePath) {
+  const encodedPath = String(filePath)
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+  return `https://api.telegram.org/file/bot${config.telegramToken}/${encodedPath}`;
+}
+
+async function downloadTelegramFile(fileId, destinationPath, { maxBytes = 0 } = {}) {
+  const fileInfo = await callTelegramMethod("getFile", { file_id: fileId });
+  const remotePath = fileInfo?.file_path;
+  if (!remotePath) {
+    throw new Error("Telegram did not return a downloadable file path.");
+  }
+
+  const response = await fetch(telegramFileDownloadUrl(remotePath));
+  if (!response.ok) {
+    throw new Error(`Failed to download Telegram file (HTTP ${response.status}).`);
+  }
+  const declaredLength = Number(response.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declaredLength) && maxBytes > 0 && declaredLength > maxBytes) {
+    throw new Error(
+      `Downloaded file exceeds file-size limit (${formatBytes(declaredLength)} > ${formatBytes(maxBytes)}).`,
+    );
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+  if (maxBytes > 0 && buffer.byteLength > maxBytes) {
+    throw new Error(
+      `Downloaded file exceeds file-size limit (${formatBytes(buffer.byteLength)} > ${formatBytes(maxBytes)}).`,
+    );
+  }
+  await fs.promises.mkdir(path.dirname(destinationPath), { recursive: true });
+  await fs.promises.writeFile(destinationPath, buffer);
+  return {
+    bytes: buffer.byteLength,
+    remotePath,
+  };
+}
+
+function voiceStatusText() {
+  const settings = voiceTranscriber.settings();
+  const dependencyStatus = voiceTranscriber.dependencyStatus();
+  const dependencySummary = dependencyStatus.ok
+    ? "ok"
+    : [
+      dependencyStatus.ffmpeg !== "ok" ? `ffmpeg=${dependencyStatus.ffmpeg}` : "",
+      dependencyStatus.whisper !== "ok" ? `whisper=${dependencyStatus.whisper}` : "",
+    ].filter(Boolean).join(" | ");
+
+  return [
+    `Voice to Codex: ${config.voiceToCodexEnabled ? "enabled" : "disabled"}`,
+    `Whisper model: ${settings.model}`,
+    `Task: ${settings.task}`,
+    `Language: ${settings.language || "auto-detect"}`,
+    `Device: ${settings.device}`,
+    `Timeout: ${settings.timeoutMs}ms`,
+    `fp16: ${settings.fp16 ? "true" : "false"}`,
+    `Max duration: ${config.voiceMaxDurationSeconds}s`,
+    `Max file size: ${formatBytes(config.voiceMaxFileBytes)}`,
+    `Temp dir: ${voiceTempRootDir()}`,
+    `Dependencies: ${dependencySummary}`,
+  ].join("\n");
+}
+
+function voiceHelpText() {
+  return [
+    "Voice note usage:",
+    "- Send a Telegram voice note to this bot.",
+    "- The bot downloads audio, transcribes it with Whisper, then forwards the transcript to Codex.",
+    "",
+    `Current task: ${config.whisperTask}`,
+    `Language: ${config.whisperLanguage || "auto-detect"}`,
+    `Device: ${config.whisperDevice}`,
+    `Max voice duration: ${config.voiceMaxDurationSeconds}s`,
+    `Max file size: ${formatBytes(config.voiceMaxFileBytes)}`,
+    "",
+    "Use /voice_status to inspect full voice pipeline configuration.",
+  ].join("\n");
+}
+
+async function updateVoiceProgressMessage(ctx, progressState, text) {
+  if (!ctx.chat || !progressState) {
+    return;
+  }
+
+  const nextText = String(text ?? "").trim();
+  if (!nextText || progressState.lastText === nextText) {
+    return;
+  }
+
+  const chatId = ctx.chat.id;
+  if (!progressState.messageId) {
+    const sent = await ctx.reply(nextText);
+    if (sent?.message_id) {
+      progressState.messageId = sent.message_id;
+    }
+    progressState.lastText = nextText;
+    return;
+  }
+
+  try {
+    await bot.api.editMessageText(chatId, progressState.messageId, nextText);
+    progressState.lastText = nextText;
+  } catch (error) {
+    const description = String(error?.description ?? error?.message ?? "");
+    if (/message is not modified/i.test(description)) {
+      progressState.lastText = nextText;
+      return;
+    }
+
+    // Fall back to a new message when Telegram rejects editing for other reasons.
+    try {
+      const sent = await ctx.reply(nextText);
+      if (sent?.message_id) {
+        progressState.messageId = sent.message_id;
+      }
+      progressState.lastText = nextText;
+    } catch (sendError) {
+      console.error("Failed to update voice progress message:", sendError);
+    }
+  }
 }
 
 async function updateDraft(chatId, draftId, payload) {
@@ -1146,6 +1352,8 @@ function helpText() {
     "/chatid - show the current Telegram chat ID",
     "/threads [n] - list recent local Codex thread IDs",
     "/replay [n] - replay recent turns from active/latest thread (default 10)",
+    "/voice_status - show voice transcription configuration and dependency status",
+    "/voice_help - show voice note usage and limits",
     "/start_codex [path] - start a Codex session",
     "/resume_thread <thread_id> [path] - attach session to an existing Codex thread",
     "/stop_codex - stop the current session",
@@ -1157,6 +1365,7 @@ function helpText() {
     "/ctrlc - interrupt the current Codex request",
     "",
     "Any non-command text message is forwarded directly to the active Codex session.",
+    "Telegram voice notes are transcribed with Whisper and then forwarded to Codex.",
   ].join("\n");
 }
 
@@ -1200,6 +1409,173 @@ async function forwardPrompt(ctx, promptText) {
         activeRequest = null;
       }
     });
+}
+
+function voiceFileExtension(voice, remotePath) {
+  const fromPath = typeof remotePath === "string" ? path.extname(remotePath.trim()) : "";
+  if (fromPath) {
+    return fromPath;
+  }
+
+  const mimeType = String(voice?.mime_type ?? "").toLowerCase();
+  if (mimeType.includes("ogg")) {
+    return ".ogg";
+  }
+  if (mimeType.includes("mpeg")) {
+    return ".mp3";
+  }
+  if (mimeType.includes("mp4")) {
+    return ".mp4";
+  }
+
+  return ".bin";
+}
+
+async function handleVoiceMessage(ctx) {
+  const voice = ctx.msg?.voice;
+  if (!voice) {
+    return;
+  }
+
+  if (!config.voiceToCodexEnabled) {
+    await ctx.reply("Voice-to-Codex is disabled. Enable VOICE_TO_CODEX_ENABLED to use voice notes.");
+    return;
+  }
+
+  if (!session.isRunning) {
+    await ctx.reply("Codex is not running. Use /start_codex first.");
+    return;
+  }
+
+  if (session.isBusy) {
+    await ctx.reply("Codex is busy. Wait for the current request to finish or use /ctrlc.");
+    return;
+  }
+
+  const chatId = String(ctx.chat.id);
+  if (voiceProcessingChats.has(chatId)) {
+    await ctx.reply("A voice note is already being processed for this chat. Wait for it to finish.");
+    return;
+  }
+
+  const durationSeconds = Number(voice.duration ?? 0);
+  if (
+    Number.isFinite(durationSeconds)
+    && durationSeconds > config.voiceMaxDurationSeconds
+  ) {
+    await ctx.reply(
+      `Voice note too long (${durationSeconds}s). Limit is ${config.voiceMaxDurationSeconds}s.`,
+    );
+    return;
+  }
+
+  const declaredFileBytes = Number(voice.file_size ?? 0);
+  if (Number.isFinite(declaredFileBytes) && declaredFileBytes > config.voiceMaxFileBytes) {
+    await ctx.reply(
+      `Voice note too large (${formatBytes(declaredFileBytes)}). Limit is ${formatBytes(config.voiceMaxFileBytes)}.`,
+    );
+    return;
+  }
+
+  const startedAt = Date.now();
+  let jobDir = "";
+  const progressState = {
+    messageId: null,
+    lastText: "",
+  };
+  voiceProcessingChats.add(chatId);
+  try {
+    await updateVoiceProgressMessage(
+      ctx,
+      progressState,
+      [
+        "Voice note received.",
+        "Status: Downloading audio...",
+      ].join("\n"),
+    );
+
+    jobDir = await createVoiceJobDirectory();
+    const initialPath = path.join(jobDir, "input.audio");
+    const download = await downloadTelegramFile(voice.file_id, initialPath, {
+      maxBytes: config.voiceMaxFileBytes,
+    });
+    const extension = voiceFileExtension(voice, download.remotePath);
+    const inputPath = path.join(jobDir, `input${extension}`);
+    await fs.promises.rename(initialPath, inputPath);
+
+    const stat = await fs.promises.stat(inputPath);
+    if (stat.size > config.voiceMaxFileBytes) {
+      throw new Error(
+        `Voice note exceeds file-size limit (${formatBytes(stat.size)} > ${formatBytes(config.voiceMaxFileBytes)}).`,
+      );
+    }
+
+    await updateVoiceProgressMessage(
+      ctx,
+      progressState,
+      [
+        "Voice note received.",
+        "Status: Transcribing voice note...",
+      ].join("\n"),
+    );
+    const transcription = await voiceTranscriber.transcribe({
+      inputPath,
+      workingDir: jobDir,
+    });
+
+    const transcript = String(transcription.text ?? "").trim();
+    if (!transcript) {
+      await updateVoiceProgressMessage(
+        ctx,
+        progressState,
+        [
+          "Voice note received.",
+          "Status: No transcript could be extracted.",
+          "Try speaking more clearly and retry.",
+        ].join("\n"),
+      );
+      return;
+    }
+
+    const preview = clipText(transcript);
+    await updateVoiceProgressMessage(
+      ctx,
+      progressState,
+      [
+        `Transcript ready (${transcription.language || "unknown language"}).`,
+        preview ? `Preview: ${preview}` : "",
+      ].filter(Boolean).join("\n"),
+    );
+
+    console.log(
+      [
+        "[voice]",
+        `chat=${chatId}`,
+        `message=${ctx.msg.message_id}`,
+        `duration_s=${durationSeconds}`,
+        `bytes=${stat.size}`,
+        `language=${transcription.language || "unknown"}`,
+        `model=${transcription.model}`,
+        `task=${transcription.task}`,
+        `elapsed_ms=${Date.now() - startedAt}`,
+      ].join(" "),
+    );
+
+    await forwardPrompt(ctx, `${voicePromptPrefix()}\n${transcript}`);
+  } catch (error) {
+    console.error(
+      `[voice] processing failed for chat ${chatId}, message ${ctx.msg.message_id}:`,
+      error,
+    );
+    await updateVoiceProgressMessage(
+      ctx,
+      progressState,
+      `Voice transcription failed: ${error.message}`,
+    );
+  } finally {
+    voiceProcessingChats.delete(chatId);
+    await removeDirectoryQuietly(jobDir);
+  }
 }
 
 async function startFreshSession(workdir) {
@@ -1284,7 +1660,7 @@ async function setRepoPathConversation(conversation, ctx) {
       ...panelHeaderLines(buildBreadcrumb(["Home", "Repositories", "Custom Path"])),
       "",
       "Send the repo path in your next message.",
-      "Example: C:\\Users\\lucas\\Desktop\\project",
+      "Example: C:\\Users\\your-user\\Desktop\\project",
       "Example: .\\another-project",
       "",
       "Type cancel to abort.",
@@ -1699,6 +2075,14 @@ bot.on("message:web_app_data", async (ctx) => {
 
 bot.command("chatid", async (ctx) => {
   await ctx.reply(currentChatIdText(ctx));
+});
+
+bot.command("voice_status", async (ctx) => {
+  await ctx.reply(voiceStatusText());
+});
+
+bot.command("voice_help", async (ctx) => {
+  await ctx.reply(voiceHelpText());
 });
 
 bot.command("threads", async (ctx) => {
@@ -2205,6 +2589,10 @@ bot.callbackQuery(/^pick:thread:([0-9a-f-]{36}|\d+)$/i, async (ctx) => {
   }
 });
 
+bot.on("message:voice", async (ctx) => {
+  await handleVoiceMessage(ctx);
+});
+
 bot.on("message:text", async (ctx) => {
   const text = ctx.msg.text.trim();
   if (!text || text.startsWith("/")) {
@@ -2339,6 +2727,21 @@ async function refreshBotUiConfiguration() {
 console.log("Starting Telegram Codex bridge...");
 console.log(`Default workdir: ${defaultWorkdir}`);
 console.log(`Authorized chat count: ${config.allowedChatIds.size}`);
+if (config.voiceToCodexEnabled) {
+  const dependencyStatus = voiceTranscriber.dependencyStatus();
+  console.log(
+    `Voice pipeline enabled (model=${config.whisperModel}, task=${config.whisperTask}, language=${config.whisperLanguage || "auto"}, device=${config.whisperDevice}, fp16=${config.whisperFp16}).`,
+  );
+  if (!dependencyStatus.ok) {
+    console.warn("Voice pipeline dependencies are not ready.");
+    if (dependencyStatus.ffmpeg !== "ok") {
+      console.warn(`ffmpeg: ${dependencyStatus.ffmpeg}`);
+    }
+    if (dependencyStatus.whisper !== "ok") {
+      console.warn(`whisper: ${dependencyStatus.whisper}`);
+    }
+  }
+}
 
 try {
   await refreshBotUiConfiguration();
